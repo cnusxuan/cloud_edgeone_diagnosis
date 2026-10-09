@@ -17,7 +17,7 @@ Every request goes through four stages in a fixed order, and each stage depends 
 [4] HTTP  send request, get response  no response -> 524, reset -> 520
 ```
 
-If DNS fails, TCP never starts; if TCP fails, TLS never starts. So the **first failing stage is the root cause**, and everything after it is noise. The tool stops at the first failure and tells you which stage it was, instead of returning a single generic error.
+If DNS fails, TCP never starts; if TCP fails, TLS never starts. So the **first failing stage is where to start looking**; later stages never ran and can be ignored. The failing stage is not the root cause itself: a TCP timeout, for example, is usually caused by a firewall rule. The tool stops at the first failure and tells you which stage it was, instead of returning a single generic error.
 
 Timeouts mirror EdgeOne's defaults for origin-pull: **5 s** for TCP connect and **15 s** for waiting on the HTTP response. A result here therefore approximates what an EdgeOne node would experience when pulling from the same server.
 
@@ -63,7 +63,7 @@ python3 eo_diag.py http://example.com:8080
   Cert:  edgeone.ai (issued by DigiCert, Inc.)
   Valid until: Mar 10 23:59:59 2027 GMT
 [4/4] HTTP  HEAD / ...
-  [OK]   HTTP/1.1 200 OK (first byte in 91 ms)
+  [OK]   HTTP/1.1 200 OK (headers received in 91 ms)
 
 === Summary ===
   Status:        200 - OK
@@ -77,7 +77,7 @@ python3 eo_diag.py http://example.com:8080
 
 ```
 [4/4] HTTP  HEAD /this-page-does-not-exist ...
-  [OK]   HTTP/1.1 404 Not Found (first byte in 1202 ms)
+  [OK]   HTTP/1.1 404 Not Found (headers received in 1202 ms)
 
 === Summary ===
   Status:        404 - Not found - check the file exists on origin (path, case)
@@ -86,7 +86,7 @@ python3 eo_diag.py http://example.com:8080
   Likely source: Origin (Server: tencent-cos)
 ```
 
-Note the time to first byte: **~90 ms on a cache HIT vs ~1200 ms on a MISS** for the same site. That gap is the cost of one trip back to origin.
+In this run the cached homepage (HIT) returned headers in **~90 ms** and the missing page (MISS) in **~1200 ms**. Going back to origin is a likely contributor, but these are **different resources with different results** (200 vs 404), so the full gap cannot be attributed to the origin trip. A same-resource HIT vs MISS comparison is needed to measure that.
 
 **Failures at each stage**
 
@@ -107,7 +107,7 @@ Note the time to first byte: **~90 ms on a cache HIT vs ~1200 ms on a MISS** for
 | **Via EdgeOne** | `yes` if the response carries an `EO-LOG-UUID` header |
 | **Cache** | `EO-Cache-Status`: `HIT` = served from the edge node, `MISS` = fetched from origin |
 | **EO-LOG-UUID** | Unique ID of this request. Include it, the status code, and the time and timezone when opening a support ticket |
-| **Likely source** | Who generated the response, judged in this order: (1) a 52x–57x code means the EdgeOne node; (2) origin-specific headers (e.g. `x-cos-*`) or a non-EdgeOne `Server` header mean the origin; (3) `Server: TencentEdgeOne` with no origin traces means the node |
+| **Likely source** | Who generated the response, judged in this order: (1) a 520–599 code **with** EdgeOne evidence (`EO-LOG-UUID` or `Server: TencentEdgeOne`) means the EdgeOne node; a 520–599 code **without** that evidence is reported as unknown; (2) origin-specific headers (e.g. `x-cos-*`) or a non-EdgeOne `Server` header mean the origin; (3) `Server: TencentEdgeOne` with no origin traces means the node |
 
 **Rule of thumb:** a **52x** means EdgeOne could not reach or get an answer from the origin (the fix is usually on the origin side: firewall allowlist, port, protocol, DNS). A standard **50x** usually comes from inside the customer's own infrastructure (e.g. their Nginx could not reach their app) and EdgeOne is just passing it through.
 
@@ -122,6 +122,7 @@ These are known and intentional for a first version:
 - **HEAD requests only.** A few servers handle `HEAD` differently from `GET`.
 - **Does not follow redirects.** A 301/302 is reported as-is; rerun with the `Location` URL.
 - **HTTP/1.1 only.** HTTP/2 and HTTP/3 are not tested.
+- **Timing is headers-received, not strict time to first byte.** The clock runs from sending the request until the full response header block arrives.
 - **"Likely source" is a heuristic.** It relies on response headers. If a customer customizes block status codes (e.g. sets WAF blocks to return 403), an EdgeOne-generated 403 can look like an origin 403.
 - **No proxy support.**
 
